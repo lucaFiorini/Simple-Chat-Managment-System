@@ -18,14 +18,18 @@
 #define DEFAULT_PORT "27015"
 
 struct handleConn_data {
+    int lock;
     pthread_t tid;
     SOCKET s;
 };
 
-void* handleConn(void * data) {
+void* handleConn(void * datain) {
 
-    SOCKET ClientSocket = ((struct handleConn_data *)data)->s;
-    pthread_t tid = ((struct handleConn_data*)data)->tid;
+    struct handleConn_data * data = ((struct handleConn_data*)datain);
+    SOCKET ClientSocket = data->s;
+    pthread_t tid = data->tid;
+    data->lock = 0;
+    
 
     char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
@@ -151,13 +155,15 @@ int __cdecl main(void)
 
         struct handleConn_data thread_data;
         thread_data.s = ClientSocket;
-        
-        pthread_create(&thread_data.tid, NULL, handleConn, (void*)&thread_data);
-        handleConn(ClientSocket);
+        thread_data.lock = 1;
+
+        pthread_create(&(thread_data.tid), NULL, handleConn, (void*)&thread_data);
+        while (thread_data.lock) continue; //wait until data is read
 
     } while (1);
 
     // No longer need server socket
     closesocket(ListenSocket);
+
     return 0;
 }
