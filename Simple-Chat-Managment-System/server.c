@@ -74,7 +74,6 @@ void* handleConn(void * datain) {
 
     // cleanup
     closesocket(ClientSocket);
-    WSACleanup();
 
 }
 
@@ -133,7 +132,7 @@ int __cdecl main(void)
 
     freeaddrinfo(result);
 
-    do {
+    while(1) {
 
         iResult = listen(ListenSocket, SOMAXCONN);
         if (iResult == SOCKET_ERROR) {
@@ -152,7 +151,7 @@ int __cdecl main(void)
             return 1;
         }
 
-
+        printf("new Client accepted\n");
         struct handleConn_data thread_data;
         thread_data.s = ClientSocket;
         thread_data.lock = 1;
@@ -160,7 +159,9 @@ int __cdecl main(void)
         pthread_create(&(thread_data.tid), NULL, handleConn, (void*)&thread_data);
         while (thread_data.lock) continue; //wait until data is read
 
-    } while (1);
+        ClientSocket = INVALID_SOCKET;
+
+    }
 
     // No longer need server socket
     closesocket(ListenSocket);
