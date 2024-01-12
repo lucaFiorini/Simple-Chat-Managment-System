@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
-
+#include <stdbool.h>
 
 // Need to link with Ws2_32.lib
 #pragma comment (lib, "Ws2_32.lib")
@@ -16,6 +16,10 @@
 
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT "27015"
+#define MAX_LOBBIES 10000
+#define MAX_ARGS 20
+
+#define SEPARATOR ,
 
 struct handleConn_data {
     int lock;
@@ -23,45 +27,171 @@ struct handleConn_data {
     SOCKET s;
 };
 
+struct Lobby {
+
+    char code[8]; //8 letter code
+    bool isPublic;
+
+    SOCKET* clients;
+    unsigned short int numClients;
+    unsigned short int maxClients;
+
+};
+#define lobby_init(code,isPublic,maxClients) (struct Lobby){code,isPublic,calloc(maxClients, sizeof(struct Lobby)),0,maxClients}
+
+struct Lobby lobbies[MAX_LOBBIES];
+int numLobbies = 0;
+
+enum createLobby_ERRS OK,TOO_FEW_CLIENTS,SERVER_FULL,CODE_TAKEN;
+
+int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
+    
+    if (maxClients < 2) return TOO_FEW_CLIENTS;
+    if (numLobbies >= MAX_LOBBIES) return SERVER_FULL;
+
+    for (int i = 0; i < numLobbies;  i++) {
+        if (strcmp(lobbies[i].code, code)) {
+            return CODE_TAKEN;
+        }
+    }
+
+    //note: change this to a system witch actually initializes a lobby in the first available slot
+    lobbies[numLobbies++] = lobby_init(code,isPrivate, maxClients);
+    
+    return OK;
+
+}
+void close_lobby() {
+
+}
+
 void* handleConn(void * datain) {
 
+    //get data from struct
     struct handleConn_data * data = ((struct handleConn_data*)datain);
     SOCKET ClientSocket = data->s;
     pthread_t tid = data->tid;
+
+    //unlock main thread
     data->lock = 0;
     
-
     char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
     int iResult;
 
+    enum Request {
+        CREATE = 0,
+        JOIN = 1,
+        INFO = 2
+    };
+
     // Receive until the peer shuts down the connection
-    do {
 
-        iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
-        if (iResult > 0) {
-            printf("Bytes received: %d\n", iResult);
+    iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+    if (iResult >= 1) {
+            
+        enum Request reqType = recvbuf[0]; //first byte is reqType
 
-            // Echo the buffer back to the sender
-            int iSendResult = send(ClientSocket, recvbuf, iResult, 0);
-            if (iSendResult == SOCKET_ERROR) {
-                printf("send failed with error: %d\n", WSAGetLastError());
-                closesocket(ClientSocket);
-                WSACleanup();
-                return 1;
+        char* args[MAX_ARGS];
+        int numArgs = 0;
+
+        if (iResult > 1) { 
+            
+            //if some arguments are given, then get them into a string array for args
+
+            char* next_token = NULL;
+            char* token = strtok_s(recvbuf + 1, ",", &next_token);
+            
+            while (token != NULL) {
+                
+                args[numArgs++] = token;
+                token = strotk_s(NULL, ",", &next_token);
+
             }
-            printf("Bytes sent: %d\n", iSendResult);
-        }
-        else if (iResult == 0)
-            printf("Connection closing...\n");
-        else {
-            printf("recv failed with error: %d\n", WSAGetLastError());
-            closesocket(ClientSocket);
-            WSACleanup();
-            return 1;
+
         }
 
-    } while (iResult > 0);
+        switch (reqType) {
+
+        case CREATE: { //ARGS : ReqCode,isPrivate,maxClients
+
+            if (numArgs == 4) {
+
+                char* reqCode = args[0];
+                bool isPrivate = strcmp(args[1],"private") ? true : false ;
+                int maxClients = atoi(args[2]);
+
+                enum createLobby_ERR err = createLobby(reqCode, isPrivate, maxClients);
+                
+                if (err != OK) {
+                    /*TODO: display error*/
+                    closesocket(ClientSocket);
+                    return;
+                }
+
+
+            } else { /*Incorrect Args Error*/
+                
+                closesocket(ClientSocket);
+                return;
+
+            }
+        }break;
+
+        case JOIN: {
+
+
+
+        }break;
+
+        case INFO: {
+
+            for (int i = 0; i < numLobbies; i++) {
+                if (lobbies[i].isPublic != true) continue; //skip private lobbies
+
+
+                char output[64];
+
+                /*
+                    Standard output format :
+                    [SID],[Connected Clients],[Max Clients]
+                    ... more ...
+                    [Last entry]
+                    (close socket)
+
+                    Standard error format:
+                    ![ERR]
+                    (close socket)
+                */
+
+                snprintf(output,64,"%s,%hu,%hu",lobbies[i].code,lobbies[i].numClients,lobbies[i].maxClients);
+                    
+                int iSendResult = send(ClientSocket, output, 64, 0);
+                if (iSendResult == SOCKET_ERROR) {
+                    printf("send failed: %d\n", WSAGetLastError());
+                    closesocket(ClientSocket);
+                    return;
+                }
+
+            }
+
+        }break;
+
+        }
+
+        free(args);
+        closesocket(ClientSocket);
+    }
+    else if (iResult == 0)
+        printf("Connection closing...\n");
+    else {
+        printf("recv failed with error: %d\n", WSAGetLastError());
+        closesocket(ClientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+
 
     // shutdown the connection since we're done
     iResult = shutdown(ClientSocket, SD_SEND);
