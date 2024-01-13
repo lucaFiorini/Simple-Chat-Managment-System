@@ -18,26 +18,94 @@
 #define DEFAULT_PORT "27015"
 #define MAX_LOBBIES 10000
 #define MAX_ARGS 20
+#define USERNAME_LEN 35
 
 #define SEPARATOR ,
 
-struct handleConn_data {
-    int lock;
-    pthread_t tid;
-    SOCKET s;
+/*
+
+RespCodes v1.0: 
+
+Information
+0 : GENERAL_SERVICE_MSG 
+1 : CLIENT_CONNECTED_MSG
+2 : CLIEND_DISCONNECTED_MSG
+
+Communication
+20 : USER_MSG
+21 : PRIV_USER_MSG
+
+Disconnections
+50 : LOBBY_CLOSED
+51 : KICKED
+
+*/
+enum respType {
+    
+    GENERAL_SERVICE_MSG = 0,
+    CLIENT_CONNECTED_MSG = 1,
+    CLIEND_DISCONNECTED_MSG = 2,
+
+    USER_MSG = 20,
+    PRIV_USER_MSG = 21,
+
+    LOBBY_CLOSED = 50,
+    KICKED = 51
+
 };
+struct Client {
+    
+    SOCKET socket;
+    struct pthread_mutex_t* socketOpLock;
+
+    char username[35];
+
+};
+int client_sendMsg(struct Client c,enum respType code, char* msg) {
+    
+    int len = strnlen(msg,DEFAULT_BUFLEN-1);
+    char sendBuf[DEFAULT_BUFLEN];
+    sendBuf[0] = code;
+    strcpy(sendBuf[1], msg);
+
+    return send(c.socket, sendBuf, len, 0);
+
+}
 
 struct Lobby {
 
     char code[8]; //8 letter code
     bool isPublic;
 
-    SOCKET* clients;
+    struct Client* clients;
     unsigned short int numClients;
-    unsigned short int maxClients;
+    unsigned short int maxClients; //if lobby closed this is 0
 
 };
 #define lobby_init(code,isPublic,maxClients) (struct Lobby){code,isPublic,calloc(maxClients, sizeof(struct Lobby)),0,maxClients}
+
+bool lobby_isClosed(struct Lobby l){
+    return (l.maxClients == 0);
+}
+
+void lobby_close(struct Lobby* l) {
+
+    for (int i = 0; i < l->numClients; i++) {
+
+        pthread_mutex_lock(l->clients[i].socketOpLock);
+
+        client_sendMsg(l->clients[i], LOBBY_CLOSED , "");
+        closesocket(l->clients[i].socket);
+        
+        pthread_mutex_unlock(l->clients[i].socketOpLock);
+
+    }
+
+    l->maxClients = 0;
+    l->numClients = 0;
+    strcpy(l->code,"\0");
+
+}
 
 struct Lobby lobbies[MAX_LOBBIES];
 int numLobbies = 0;
@@ -46,25 +114,41 @@ enum createLobby_ERRS OK,TOO_FEW_CLIENTS,SERVER_FULL,CODE_TAKEN;
 
 int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     
+    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
     if (maxClients < 2) return TOO_FEW_CLIENTS;
     if (numLobbies >= MAX_LOBBIES) return SERVER_FULL;
+    
+    pthread_mutex_lock(&mutex);
 
+    int firstSlot = -1;
     for (int i = 0; i < numLobbies;  i++) {
-        if (strcmp(lobbies[i].code, code)) {
+        
+        if (lobby_isClosed(lobbies[i]) && firstSlot == -1)
+            firstSlot = i;
+
+        else if (strcmp(lobbies[i].code, code)) 
             return CODE_TAKEN;
-        }
+        
     }
 
-    //note: change this to a system witch actually initializes a lobby in the first available slot
-    lobbies[numLobbies++] = lobby_init(code,isPrivate, maxClients);
+    if (firstSlot != -1) 
+        lobbies[firstSlot] = lobby_init(code, isPrivate, maxClients);
     
+    else 
+        lobbies[numLobbies++] = lobby_init(code,isPrivate, maxClients);
+
+    pthread_mutex_unlock(&mutex);
+
     return OK;
 
 }
-void close_lobby() {
 
-}
-
+struct handleConn_data {
+    int lock;
+    pthread_t tid;
+    SOCKET s;
+};
 void* handleConn(void * datain) {
 
     //get data from struct
