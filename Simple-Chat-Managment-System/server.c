@@ -23,14 +23,14 @@
 #define SEPARATOR ,
 
 enum RespType {
-    
+
     //DATA / INFO:
     OK = 0,
     GENERAL_SERVICE_MSG = 1,
     CLIENT_CONNECTED_MSG = 2,
     CLIEND_DISCONNECTED_MSG = 3,
 
-    USER_MSG = 20,
+    BROAD_MSG = 20,
     PRIV_USER_MSG = 21,
 
     // DISCONNECTING ERRORS:
@@ -48,12 +48,28 @@ enum RespType {
 };
 
 struct Client {
-    
+
     SOCKET socket;
     pthread_mutex_t socketOpLock;
     char username[USERNAME_LEN];
 
 };
+
+struct Lobby {
+
+    char code[8]; //8 letter code
+    bool isPublic;
+
+    struct Client* clients;
+    unsigned short int numClients;
+    unsigned short int maxClients; //if lobby closed this is 0
+
+};
+
+struct Lobby lobbies[MAX_LOBBIES];
+int numLobbies = 0;
+
+
 struct Client Client_init(SOCKET s, char* username) {
     
     struct Client c;
@@ -71,7 +87,7 @@ void Client_sendMsg(struct Client* c,enum RespType code, char* msg) {
     int len = strnlen(msg,DEFAULT_BUFLEN-1);
     char sendBuf[DEFAULT_BUFLEN];
     sendBuf[0] = code;
-    strcpy_s(sendBuf[1],DEFAULT_BUFLEN-1, msg);
+    strcpy_s(sendBuf + 1,DEFAULT_BUFLEN-1, msg);
 
     send(c->socket, sendBuf, len, 0);
     if (code >= 100) closesocket(c->socket);
@@ -80,16 +96,6 @@ void Client_sendMsg(struct Client* c,enum RespType code, char* msg) {
 
 }
 
-struct Lobby {
-
-    char code[8]; //8 letter code
-    bool isPublic;
-
-    struct Client* clients;
-    unsigned short int numClients;
-    unsigned short int maxClients; //if lobby closed this is 0
-
-};
 #define Lobby_init(code,isPublic,maxClients) (struct Lobby){code,isPublic,(struct Client*)calloc(maxClients, sizeof(struct Lobby)),0,maxClients}
 bool Lobby_isClosed(struct Lobby* lobby) { return (lobby->maxClients == 0); }
 int Lobby_sendMsg(struct Lobby* l, enum RespType code,char* msg, struct Client* sender) {
@@ -112,13 +118,14 @@ int Lobby_sendMsg(struct Lobby* l, enum RespType code,char* msg, struct Client* 
 void Lobby_close(struct Lobby* l) {
 
     Lobby_sendMsg(l,LOBBY_CLOSED, "", NULL);
-
     l->maxClients = 0;
     l->numClients = 0;
-    strcpy(l->code,"\0");
+    strcpy_s(l->code,8,"\0");
     free(l->clients);
+    numLobbies--;
+
 }
-void Lobby_join(struct Lobby* l,struct Client c) {
+void Lobby_join(struct Lobby* l,struct Client* c) {
     
     if (l->numClients >= l->maxClients) {
 
@@ -126,13 +133,53 @@ void Lobby_join(struct Lobby* l,struct Client c) {
         return;
 
     }
+    
+    l->numClients++;
 
+    long len;
+    ioctlsocket(&c, FIONREAD, &len);
 
+    for (int i = 0; i < l->maxClients; i++) {
+        struct Client* curr = &l->clients[i];
+
+        if (isClient(curr)){
+
+            *curr = *c;
+            Lobby_sendMsg(l, CLIENT_CONNECTED_MSG, c->username, c);
+
+            break;
+    
+        }
+    
+    }
 
 }
+void Lobby_run(struct Lobby* l) {
+    
+    char inputBuf[DEFAULT_BUFLEN];
+    while (true) {
 
-struct Lobby lobbies[MAX_LOBBIES];
-int numLobbies = 0;
+        for (int i = 0; i < l->maxClients; i++) {
+            
+            struct Client* c = &l->clients[i];
+            if (!isClient(c))
+                continue;
+
+            int iRecv = recv(c->socket, inputBuf, DEFAULT_BUFLEN, NULL);
+            if (iRecv > 0) {
+                char* msg = inputBuf+1;
+
+                if (inputBuf[0] == BROAD_MSG) {
+                    Lobby_sendMsg(l,BROAD_MSG,msg,c);
+                }
+
+            }
+
+        }
+
+    }
+
+}
 
 int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     
@@ -164,10 +211,6 @@ int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
 
     return OK;
 
-}
-
-void* lobbyRun()(void* stuff){
-    //TODO
 }
 
 struct handleConn_data {
@@ -215,7 +258,7 @@ void* handleConn(void * datain) {
             while (token != NULL) {
                 
                 args[numArgs++] = token;
-                token = strotk_s(NULL, ",", &next_token);
+                token = strtok_s(NULL, ",", &next_token);
 
             }
 
