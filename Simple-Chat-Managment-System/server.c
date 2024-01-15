@@ -96,7 +96,13 @@ void Client_sendMsg(struct Client* c,enum RespType code, char* msg) {
 
 }
 
-#define Lobby_init(code,isPublic,maxClients) (struct Lobby){code,isPublic,(struct Client*)calloc(maxClients, sizeof(struct Lobby)),0,maxClients}
+struct Lobby Lobby_init(char * code,bool isPublic,int maxClients) {
+    
+    struct Lobby l;
+    l.clients = calloc(maxClients, sizeof(struct Client));
+    strcpy_s(l.code); // todo
+
+}
 bool Lobby_isClosed(struct Lobby* lobby) { return (lobby->maxClients == 0); }
 int Lobby_sendMsg(struct Lobby* l, enum RespType code,char* msg, struct Client* sender) {
 
@@ -204,9 +210,10 @@ int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     if (firstSlot != -1) 
         lobbies[firstSlot] = Lobby_init(code, isPrivate, maxClients);
     
-    else 
-        lobbies[numLobbies++] = Lobby_init(code,isPrivate, maxClients);
-
+    else {
+        struct Lobby l = Lobby_init(code, isPrivate, maxClients);
+        lobbies[numLobbies++] = l;
+    }
     pthread_mutex_unlock(&mutex);
 
     return OK;
@@ -268,7 +275,7 @@ void* handleConn(void * datain) {
 
         case CREATE: { //ARGS : ReqCode,isPrivate,maxClients
 
-            if (numArgs == 4) {
+            if (numArgs == 3) {
 
                 char* reqCode = args[0];
                 bool isPrivate = strcmp(args[1],"private") ? true : false ;
@@ -280,6 +287,7 @@ void* handleConn(void * datain) {
                 }
 
             }
+
         }break;
 
         case JOIN: {
