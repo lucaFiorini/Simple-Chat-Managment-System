@@ -22,53 +22,61 @@
 
 #define SEPARATOR ,
 
-/*
-
-RespCodes v1.0: 
-
-Information
-0 : GENERAL_SERVICE_MSG 
-1 : CLIENT_CONNECTED_MSG
-2 : CLIEND_DISCONNECTED_MSG
-
-Communication
-20 : USER_MSG
-21 : PRIV_USER_MSG
-
-Disconnections
-50 : LOBBY_CLOSED
-51 : KICKED
-
-*/
-enum respType {
+enum RespType {
     
-    GENERAL_SERVICE_MSG = 0,
-    CLIENT_CONNECTED_MSG = 1,
-    CLIEND_DISCONNECTED_MSG = 2,
+    //DATA / INFO:
+    OK = 0,
+    GENERAL_SERVICE_MSG = 1,
+    CLIENT_CONNECTED_MSG = 2,
+    CLIEND_DISCONNECTED_MSG = 3,
 
     USER_MSG = 20,
     PRIV_USER_MSG = 21,
 
-    LOBBY_CLOSED = 50,
-    KICKED = 51
+    // DISCONNECTING ERRORS:
+    INCORRECT_ARGS = 300,
 
+    CODE_TAKEN = 301,
+    SERVER_FULL = 302,
+    TOO_FEW_CLIENTS = 303,
+    LOBBY_FULL = 304,
+
+    LOBBY_CLOSED = 400,
+    KICKED = 401,
+
+    OTHER = 500,
 };
+
 struct Client {
     
     SOCKET socket;
-    struct pthread_mutex_t* socketOpLock;
-
-    char username[35];
+    pthread_mutex_t socketOpLock;
+    char username[USERNAME_LEN];
 
 };
-int client_sendMsg(struct Client c,enum respType code, char* msg) {
+struct Client Client_init(SOCKET s, char* username) {
     
+    struct Client c;
+    c.socket = s;
+    pthread_mutex_init(&c.socketOpLock,NULL);
+    strcpy_s(c.username,USERNAME_LEN,username);
+    
+    return c;
+}
+bool isClient(struct Client* c) { return c->socket != NULL; }
+void Client_sendMsg(struct Client* c,enum RespType code, char* msg) {
+    
+    pthread_mutex_lock(c->socketOpLock);
+
     int len = strnlen(msg,DEFAULT_BUFLEN-1);
     char sendBuf[DEFAULT_BUFLEN];
     sendBuf[0] = code;
-    strcpy(sendBuf[1], msg);
+    strcpy_s(sendBuf[1],DEFAULT_BUFLEN-1, msg);
 
-    return send(c.socket, sendBuf, len, 0);
+    send(c->socket, sendBuf, len, 0);
+    if (code >= 100) closesocket(c->socket);
+
+    pthread_mutex_unlock(c->socketOpLock);
 
 }
 
@@ -82,35 +90,49 @@ struct Lobby {
     unsigned short int maxClients; //if lobby closed this is 0
 
 };
-#define lobby_init(code,isPublic,maxClients) (struct Lobby){code,isPublic,calloc(maxClients, sizeof(struct Lobby)),0,maxClients}
+#define Lobby_init(code,isPublic,maxClients) (struct Lobby){code,isPublic,(struct Client*)calloc(maxClients, sizeof(struct Lobby)),0,maxClients}
+bool Lobby_isClosed(struct Lobby* lobby) { return (lobby->maxClients == 0); }
+int Lobby_sendMsg(struct Lobby* l, enum RespType code,char* msg, struct Client* sender) {
 
-bool lobby_isClosed(struct Lobby l){
-    return (l.maxClients == 0);
-}
+    for (int i = 0; i < l->maxClients; i++) {
 
-void lobby_close(struct Lobby* l) {
+        struct Client* c = &l->clients[i];
+        if (isClient(c)) {
 
-    for (int i = 0; i < l->numClients; i++) {
+            if (sender != NULL && sender == c)
+                continue;
 
-        pthread_mutex_lock(l->clients[i].socketOpLock);
+            Client_sendMsg(c, code, msg);
 
-        client_sendMsg(l->clients[i], LOBBY_CLOSED , "");
-        closesocket(l->clients[i].socket);
-        
-        pthread_mutex_unlock(l->clients[i].socketOpLock);
+        }
 
     }
+
+}
+void Lobby_close(struct Lobby* l) {
+
+    Lobby_sendMsg(l,LOBBY_CLOSED, "", NULL);
 
     l->maxClients = 0;
     l->numClients = 0;
     strcpy(l->code,"\0");
+    free(l->clients);
+}
+void Lobby_join(struct Lobby* l,struct Client c) {
+    
+    if (l->numClients >= l->maxClients) {
+
+        Client_sendMsg(&c, LOBBY_FULL, "");
+        return;
+
+    }
+
+
 
 }
 
 struct Lobby lobbies[MAX_LOBBIES];
 int numLobbies = 0;
-
-enum createLobby_ERRS OK,TOO_FEW_CLIENTS,SERVER_FULL,CODE_TAKEN;
 
 int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     
@@ -124,7 +146,7 @@ int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     int firstSlot = -1;
     for (int i = 0; i < numLobbies;  i++) {
         
-        if (lobby_isClosed(lobbies[i]) && firstSlot == -1)
+        if (Lobby_isClosed(&lobbies[i]) && firstSlot == -1)
             firstSlot = i;
 
         else if (strcmp(lobbies[i].code, code)) 
@@ -133,15 +155,19 @@ int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     }
 
     if (firstSlot != -1) 
-        lobbies[firstSlot] = lobby_init(code, isPrivate, maxClients);
+        lobbies[firstSlot] = Lobby_init(code, isPrivate, maxClients);
     
     else 
-        lobbies[numLobbies++] = lobby_init(code,isPrivate, maxClients);
+        lobbies[numLobbies++] = Lobby_init(code,isPrivate, maxClients);
 
     pthread_mutex_unlock(&mutex);
 
     return OK;
 
+}
+
+void* lobbyRun()(void* stuff){
+    //TODO
 }
 
 struct handleConn_data {
@@ -205,19 +231,10 @@ void* handleConn(void * datain) {
                 bool isPrivate = strcmp(args[1],"private") ? true : false ;
                 int maxClients = atoi(args[2]);
 
-                enum createLobby_ERR err = createLobby(reqCode, isPrivate, maxClients);
-                
-                if (err != OK) {
-                    /*TODO: display error*/
-                    closesocket(ClientSocket);
-                    return;
+                enum RespType err = createLobby(reqCode, isPrivate, maxClients);
+                if (err >= 300) {
+                    //return error to socket
                 }
-
-
-            } else { /*Incorrect Args Error*/
-                
-                closesocket(ClientSocket);
-                return;
 
             }
         }break;
