@@ -14,6 +14,7 @@
 #pragma comment (lib, "Ws2_32.lib")
 // #pragma comment (lib, "Mswsock.lib")
 
+#define DEFAULT_CODELEN 8
 #define DEFAULT_BUFLEN 512
 #define DEFAULT_PORT "27015"
 #define MAX_LOBBIES 10000
@@ -22,9 +23,11 @@
 
 #define SEPARATOR ,
 
-enum RespType {
 
-    //DATA / INFO:
+enum CommType {
+
+    /* DATA / INFO: */
+
     OK = 0,
     GENERAL_SERVICE_MSG = 1,
     CLIENT_CONNECTED_MSG = 2,
@@ -33,31 +36,44 @@ enum RespType {
     BROAD_MSG = 20,
     PRIV_USER_MSG = 21,
 
-    // DISCONNECTING ERRORS:
-    INCORRECT_ARGS = 300,
+    /*Main menu options*/
 
-    CODE_TAKEN = 301,
-    SERVER_FULL = 302,
-    TOO_FEW_CLIENTS = 303,
-    LOBBY_FULL = 304,
+    CREATE_LOBBY = 50,
+    JOIN_LOBBY = 51,
+    LOBBY_LIST = 52,
 
-    LOBBY_CLOSED = 400,
-    KICKED = 401,
+    /* Errors :  */
 
-    OTHER = 500,
+    DISCON_CUTOFF = 99,
+
+    INCORRECT_ARGS = 100,
+    CODE_TOO_LONG = 101,
+    
+    CODE_TAKEN = 120,
+    SERVER_FULL = 121,
+    TOO_FEW_CLIENTS = 122,
+
+    LOBBY_FULL = 150,
+    INVALID_CODE = 151,
+
+    LOBBY_CLOSED = 200,
+    KICKED = 201,
+
+    OTHER = 255,
 };
+
 
 struct Client {
 
     SOCKET socket;
     pthread_mutex_t socketOpLock;
-    char username[USERNAME_LEN];
+    unsigned char username[USERNAME_LEN];
 
 };
 
 struct Lobby {
 
-    char code[8]; //8 letter code
+    unsigned char code[DEFAULT_CODELEN]; //8 letter code
     bool isPublic;
 
     struct Client* clients;
@@ -70,7 +86,7 @@ struct Lobby lobbies[MAX_LOBBIES];
 int numLobbies = 0;
 
 
-struct Client Client_init(SOCKET s, char* username) {
+struct Client Client_init(SOCKET s, unsigned char* username) {
     
     struct Client c;
     c.socket = s;
@@ -80,31 +96,46 @@ struct Client Client_init(SOCKET s, char* username) {
     return c;
 }
 bool isClient(struct Client* c) { return c->socket != NULL; }
-void Client_sendMsg(struct Client* c,enum RespType code, char* msg) {
+void Client_sendMsg(struct Client* c,enum CommType code, unsigned char* msg) {
     
+    unsigned char sendBuf[DEFAULT_BUFLEN];
+    int len = 0;
+
     pthread_mutex_lock(c->socketOpLock);
 
-    int len = strnlen(msg,DEFAULT_BUFLEN-1);
-    char sendBuf[DEFAULT_BUFLEN];
+    if (msg != NULL) {
+
+        len = strnlen(msg, DEFAULT_BUFLEN - 1);
+        strcpy_s(sendBuf + 1, DEFAULT_BUFLEN - 1, msg);
+        
+    }
+
     sendBuf[0] = code;
-    strcpy_s(sendBuf + 1,DEFAULT_BUFLEN-1, msg);
+    send(c->socket, sendBuf, len+2, 0);
+    if (code >= 100) {
+        closesocket(c->socket);
+        pthread_mutex_unlock(&c->socketOpLock);
+        pthread_exit(NULL);
+    }
 
-    send(c->socket, sendBuf, len, 0);
-    if (code >= 100) closesocket(c->socket);
-
-    pthread_mutex_unlock(c->socketOpLock);
+    pthread_mutex_unlock(&c->socketOpLock);
 
 }
 
-struct Lobby Lobby_init(char * code,bool isPublic,int maxClients) {
+struct Lobby Lobby_init(unsigned char * code,bool isPublic,int maxClients) {
     
-    struct Lobby l;
-    l.clients = calloc(maxClients, sizeof(struct Client));
-    strcpy_s(l.code); // todo
+    struct Lobby lobby = { 0 };
+    lobby.clients = calloc(maxClients, sizeof(struct Client));
+    strcpy_s(lobby.code,DEFAULT_CODELEN,code);
+    lobby.isPublic = isPublic;
+    lobby.maxClients = maxClients;
+    lobby.numClients = 0;
+    
+    return lobby;
 
 }
 bool Lobby_isClosed(struct Lobby* lobby) { return (lobby->maxClients == 0); }
-int Lobby_sendMsg(struct Lobby* l, enum RespType code,char* msg, struct Client* sender) {
+int Lobby_sendMsg(struct Lobby* l, enum CommType code,unsigned char* msg, struct Client* sender) {
 
     for (int i = 0; i < l->maxClients; i++) {
 
@@ -126,43 +157,50 @@ void Lobby_close(struct Lobby* l) {
     Lobby_sendMsg(l,LOBBY_CLOSED, "", NULL);
     l->maxClients = 0;
     l->numClients = 0;
-    strcpy_s(l->code,8,"\0");
+    strcpy_s(l->code,DEFAULT_CODELEN,"\0");
     free(l->clients);
     numLobbies--;
 
 }
-void Lobby_join(struct Lobby* l,struct Client* c) {
+void Lobby_join(unsigned char* code,struct Client* c) {
     
+    struct Lobby* l = NULL;
+    for (int i = 0; i < MAX_LOBBIES; i++) {
+        if (! Lobby_isClosed(&lobbies[i]) && strcmp(lobbies[i].code, code) == 0) {
+            l = &lobbies[i];
+            break;
+        }
+    }
+
+    if (l == NULL) {
+        Client_sendMsg(c, INVALID_CODE, NULL);
+        return;
+    }
+
+    printf("%s joined lobby %s\n", c->username, l->code);
+
     if (l->numClients >= l->maxClients) {
 
-        Client_sendMsg(&c, LOBBY_FULL, "");
+        Client_sendMsg(c, LOBBY_FULL, NULL);
         return;
 
     }
-    
-    l->numClients++;
 
     long len;
-    ioctlsocket(&c, FIONREAD, &len);
+    ioctlsocket(c->socket, FIONREAD, &len);
+    l->clients[l->numClients++] = *c;
 
-    for (int i = 0; i < l->maxClients; i++) {
-        struct Client* curr = &l->clients[i];
+    Client_sendMsg(c, OK, NULL);
+    Lobby_sendMsg(l, CLIENT_CONNECTED_MSG, c->username, c);
 
-        if (isClient(curr)){
 
-            *curr = *c;
-            Lobby_sendMsg(l, CLIENT_CONNECTED_MSG, c->username, c);
-
-            break;
-    
-        }
-    
-    }
 
 }
 void Lobby_run(struct Lobby* l) {
     
-    char inputBuf[DEFAULT_BUFLEN];
+    printf("lobby %s is now running\n", l->code);
+
+    unsigned char inputBuf[DEFAULT_BUFLEN];
     while (true) {
 
         for (int i = 0; i < l->maxClients; i++) {
@@ -173,7 +211,7 @@ void Lobby_run(struct Lobby* l) {
 
             int iRecv = recv(c->socket, inputBuf, DEFAULT_BUFLEN, NULL);
             if (iRecv > 0) {
-                char* msg = inputBuf+1;
+                unsigned char* msg = inputBuf+1;
 
                 if (inputBuf[0] == BROAD_MSG) {
                     Lobby_sendMsg(l,BROAD_MSG,msg,c);
@@ -187,7 +225,7 @@ void Lobby_run(struct Lobby* l) {
 
 }
 
-int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
+int createLobby(unsigned char code[8], bool isPublic, unsigned short maxClients, enum CommType* err) {
     
     static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -196,28 +234,34 @@ int createLobby(char code[8], bool isPrivate, unsigned short maxClients) {
     
     pthread_mutex_lock(&mutex);
 
-    int firstSlot = -1;
+    int availableSlot = -1;
     for (int i = 0; i < numLobbies;  i++) {
         
-        if (Lobby_isClosed(&lobbies[i]) && firstSlot == -1)
-            firstSlot = i;
+        if (Lobby_isClosed(&lobbies[i]) && availableSlot == -1)
+            availableSlot = i;
 
-        else if (strcmp(lobbies[i].code, code)) 
-            return CODE_TAKEN;
+        else if (strcmp(lobbies[i].code, code) == 0) {
+            
+            pthread_mutex_unlock(&mutex);
+            *err = CODE_TAKEN;
+            return -1;
+
+        }
         
     }
 
-    if (firstSlot != -1) 
-        lobbies[firstSlot] = Lobby_init(code, isPrivate, maxClients);
+    if (availableSlot != -1) 
+        lobbies[availableSlot] = Lobby_init(code, isPublic, maxClients);
     
     else {
-        struct Lobby l = Lobby_init(code, isPrivate, maxClients);
+        struct Lobby l = Lobby_init(code, isPublic, maxClients);
+        availableSlot = numLobbies;
         lobbies[numLobbies++] = l;
     }
     pthread_mutex_unlock(&mutex);
-
-    return OK;
-
+    
+    *err = OK;
+    return availableSlot;
 }
 
 struct handleConn_data {
@@ -235,15 +279,10 @@ void* handleConn(void * datain) {
     //unlock main thread
     data->lock = 0;
     
-    char recvbuf[DEFAULT_BUFLEN];
+    unsigned char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
     int iResult;
 
-    enum Request {
-        CREATE = 0,
-        JOIN = 1,
-        INFO = 2
-    };
 
     // Receive until the peer shuts down the connection
 
@@ -252,15 +291,15 @@ void* handleConn(void * datain) {
             
         enum Request reqType = recvbuf[0]; //first byte is reqType
 
-        char* args[MAX_ARGS];
+        unsigned char* args[MAX_ARGS];
         int numArgs = 0;
 
         if (iResult > 1) { 
             
             //if some arguments are given, then get them into a string array for args
 
-            char* next_token = NULL;
-            char* token = strtok_s(recvbuf + 1, ",", &next_token);
+            unsigned char* next_token = NULL;
+            unsigned char* token = strtok_s(recvbuf + 1, ",", &next_token);
             
             while (token != NULL) {
                 
@@ -273,36 +312,54 @@ void* handleConn(void * datain) {
 
         switch (reqType) {
 
-        case CREATE: { //ARGS : ReqCode,isPrivate,maxClients
+        case CREATE_LOBBY: { //ARGS : ReqCode,isPublic,maxClients
 
             if (numArgs == 3) {
 
-                char* reqCode = args[0];
-                bool isPrivate = strcmp(args[1],"private") ? true : false ;
-                int maxClients = atoi(args[2]);
-
-                enum RespType err = createLobby(reqCode, isPrivate, maxClients);
-                if (err >= 300) {
-                    //return error to socket
+                unsigned char* reqCode = args[0];
+                if (strnlen(reqCode,DEFAULT_BUFLEN+1) >= DEFAULT_CODELEN) {
+                    
+                    unsigned char out = CODE_TOO_LONG;
+                    send(ClientSocket,&out, 1, NULL);
+                    closesocket(ClientSocket);
+                    pthread_exit(NULL);
                 }
 
+                bool isPublic = strcmp(args[1], "public") == 0;
+                int maxClients = atoi(args[2]);
+
+                enum CommType err; 
+                int lobbyIndex = createLobby(reqCode, isPublic, maxClients,&err);
+                
+                send(ClientSocket, &err, 1, NULL);
+                
+                if (lobbyIndex != -1)
+                    closesocket(ClientSocket);
+                    Lobby_run(&lobbies[lobbyIndex]);
+                
+            }
+
+
+        }break;
+
+        case JOIN_LOBBY: {
+            
+            if (numArgs == 2) {
+            
+                struct Client c = Client_init(ClientSocket, args[1]);
+                Lobby_join(args[0],&c);
+  
             }
 
         }break;
 
-        case JOIN: {
-
-
-
-        }break;
-
-        case INFO: {
+        case LOBBY_LIST: {
 
             for (int i = 0; i < numLobbies; i++) {
                 if (lobbies[i].isPublic != true) continue; //skip private lobbies
 
 
-                char output[64];
+                unsigned char output[DEFAULT_BUFLEN];
 
                 /*
                     Standard output format :
@@ -316,12 +373,13 @@ void* handleConn(void * datain) {
                     (close socket)
                 */
 
-                snprintf(output,64,"%s,%hu,%hu",lobbies[i].code,lobbies[i].numClients,lobbies[i].maxClients);
-                    
-                int iSendResult = send(ClientSocket, output, 64, 0);
+                snprintf(output+1,DEFAULT_BUFLEN," %s \t\t %hu / %hu",lobbies[i].code,lobbies[i].numClients,lobbies[i].maxClients);
+                output[0] = OK;
+                int iSendResult = send(ClientSocket, output, DEFAULT_BUFLEN, 0);
                 if (iSendResult == SOCKET_ERROR) {
                     printf("send failed: %d\n", WSAGetLastError());
                     closesocket(ClientSocket);
+                    pthread_exit(NULL);
                     return;
                 }
 
@@ -331,15 +389,13 @@ void* handleConn(void * datain) {
 
         }
 
-        free(args);
-        closesocket(ClientSocket);
     }
     else if (iResult == 0)
         printf("Connection closing...\n");
     else {
         printf("recv failed with error: %d\n", WSAGetLastError());
         closesocket(ClientSocket);
-        WSACleanup();
+        pthread_exit(NULL);
         return 1;
     }
 
@@ -350,12 +406,14 @@ void* handleConn(void * datain) {
     if (iResult == SOCKET_ERROR) {
         printf("shutdown failed with error: %d\n", WSAGetLastError());
         closesocket(ClientSocket);
-        WSACleanup();
+        pthread_exit(NULL);
         return 1;
     }
 
     // cleanup
+    send(ClientSocket, "\0",1,NULL);
     closesocket(ClientSocket);
+    pthread_exit(NULL);
 
 }
 
@@ -389,7 +447,6 @@ int __cdecl main(void)
     iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
     if (iResult != 0) {
         printf("getaddrinfo failed with error: %d\n", iResult);
-        WSACleanup();
         return 1;
     }
 
@@ -398,7 +455,6 @@ int __cdecl main(void)
     if (ListenSocket == INVALID_SOCKET) {
         printf("socket failed with error: %ld\n", WSAGetLastError());
         freeaddrinfo(result);
-        WSACleanup();
         return 1;
     }
 
@@ -408,7 +464,6 @@ int __cdecl main(void)
         printf("bind failed with error: %d\n", WSAGetLastError());
         freeaddrinfo(result);
         closesocket(ListenSocket);
-        WSACleanup();
         return 1;
     }
 
@@ -420,7 +475,6 @@ int __cdecl main(void)
         if (iResult == SOCKET_ERROR) {
             printf("listen failed with error: %d\n", WSAGetLastError());
             closesocket(ListenSocket);
-            WSACleanup();
             return 1;
         }
 
@@ -429,7 +483,6 @@ int __cdecl main(void)
         if (ClientSocket == INVALID_SOCKET) {
             printf("accept failed with error: %d\n", WSAGetLastError());
             closesocket(ListenSocket);
-            WSACleanup();
             return 1;
         }
 
@@ -440,8 +493,6 @@ int __cdecl main(void)
 
         pthread_create(&(thread_data.tid), NULL, handleConn, (void*)&thread_data);
         while (thread_data.lock) continue; //wait until data is read
-
-        ClientSocket = INVALID_SOCKET;
 
     }
 
