@@ -109,9 +109,11 @@ void Client_sendMsg(struct Client* c,enum CommType code, unsigned char* msg) {
         strcpy_s(sendBuf + 1, DEFAULT_BUFLEN - 1, msg);
         
     }
+    
+    if (len > 0) len++; //making sure we send terminator NULL
 
     sendBuf[0] = code;
-    send(c->socket, sendBuf, len+2, 0);
+    int iResult = send(c->socket, sendBuf, len+1, 0);
     if (code >= 100) {
         closesocket(c->socket);
         pthread_mutex_unlock(&c->socketOpLock);
@@ -142,7 +144,7 @@ int Lobby_sendMsg(struct Lobby* l, enum CommType code,unsigned char* msg, struct
         struct Client* c = &l->clients[i];
         if (isClient(c)) {
 
-            if (sender != NULL && sender == c)
+            if (sender == c)
                 continue;
 
             Client_sendMsg(c, code, msg);
@@ -188,10 +190,10 @@ void Lobby_join(unsigned char* code,struct Client* c) {
 
     long len;
     ioctlsocket(c->socket, FIONREAD, &len);
-    l->clients[l->numClients++] = *c;
+    l->clients[l->numClients++] = *c; //todo implement adding clients properly ffs
 
     Client_sendMsg(c, OK, NULL);
-    Lobby_sendMsg(l, CLIENT_CONNECTED_MSG, c->username, c);
+    Lobby_sendMsg(l, CLIENT_CONNECTED_MSG, c->username, &l->clients[l->numClients-1]);
 
 
 
@@ -350,6 +352,8 @@ void* handleConn(void * datain) {
                 Lobby_join(args[0],&c);
   
             }
+            
+            pthread_exit(NULL);
 
         }break;
 
