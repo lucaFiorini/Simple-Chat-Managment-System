@@ -23,7 +23,6 @@
 
 #define SEPARATOR ,
 
-
 enum CommType {
 
     /* DATA / INFO: */
@@ -31,10 +30,14 @@ enum CommType {
     OK = 0,
     GENERAL_SERVICE_MSG = 1,
     CLIENT_CONNECTED_MSG = 2,
-    CLIEND_DISCONNECTED_MSG = 3,
+    CLIENT_DISCONNECTED_MSG = 3,
 
     BROAD_MSG = 20,
     PRIV_USER_MSG = 21,
+
+    CALCULATE = 30,
+
+    PING = 40,
 
     /*Main menu options*/
 
@@ -48,7 +51,7 @@ enum CommType {
 
     INCORRECT_ARGS = 100,
     CODE_TOO_LONG = 101,
-    
+
     CODE_TAKEN = 120,
     SERVER_FULL = 121,
     TOO_FEW_CLIENTS = 122,
@@ -235,39 +238,106 @@ void Lobby_join(unsigned char* code,struct Client* cin) {
 
         int iRecv = recv(c.socket, inputBuf, DEFAULT_BUFLEN, NULL);
         if (iRecv > 0) {
+
             unsigned char* msg = inputBuf + 1;
 
-            if (inputBuf[0] == BROAD_MSG) {
+            switch (inputBuf[0]){
 
-                char outputMsg[DEFAULT_BUFLEN-1];
+            case BROAD_MSG: {
+
+                char outputMsg[DEFAULT_BUFLEN - 1];
 
                 unsigned short len = strlen(c.username);
-                strcpy_s(outputMsg,(DEFAULT_BUFLEN -  2),c.username);
-                strcpy_s(outputMsg + len, (DEFAULT_BUFLEN - 2 ) - USERNAME_LEN, ",");
-                strcpy_s(outputMsg + len + 1,(DEFAULT_BUFLEN - 2 ) - USERNAME_LEN, msg);
-
-                //printf("user %s writes %s in lobby %s", c.username, outputMsg, l->code);
+                strcpy_s(outputMsg, (DEFAULT_BUFLEN - 2), c.username);
+                strcpy_s(outputMsg + len, (DEFAULT_BUFLEN - 2) - USERNAME_LEN, ",");
+                strcpy_s(outputMsg + len + 1, (DEFAULT_BUFLEN - 2) - USERNAME_LEN, msg);
 
                 Lobby_sendMsg(l, BROAD_MSG, outputMsg, &l->clients[clientID]);
 
-            }
-            else if (inputBuf[0] == CLIEND_DISCONNECTED_MSG){
+            } break;
 
-                Lobby_sendMsg(l, CLIEND_DISCONNECTED_MSG, c.username , &l->clients[clientID]);
-                
+            case CLIENT_DISCONNECTED_MSG: {
+                Lobby_sendMsg(l, CLIENT_DISCONNECTED_MSG, c.username, &l->clients[clientID]);
+
                 closesocket(c.socket);
                 lobbies->numClients--;
                 lobbies->clients[clientID].socket = INVALID_SOCKET;
-                
-                return;
 
+                return;
+            
+            } break;
+
+            case CALCULATE :{
+
+                double resval = -300;
+
+                int msglen = strnlen(msg, DEFAULT_BUFLEN);
+
+                char* arg1 = msg;
+                char op = NULL;
+                char* arg2 = NULL;
+
+                for (int i = 0; i < msglen; i++) {
+                    if (msg[i] == '+' || msg[i] == '-' || msg[i] == '*' || msg[i] == '/') {
+                        
+                        op = msg[i];
+                        msg[i] = '\0';
+                        double arg1val = atof(arg1);
+                        msg[i] = op;
+                        arg2 = msg + 1;
+
+                        double arg2val = atof(arg2);
+
+                        switch (op) {
+                        case '+':
+                            resval = arg1val + arg2val;
+                        break;
+                        case '-':
+                            resval = arg1val - arg2val;
+                        break;
+                        case '/':
+                            resval = arg1val / arg2val;
+                        break;
+                        case '*':
+                            resval = arg1val * arg2val;
+                        break;
+                        }
+
+                        break;
+                    }
+                }
+                
+
+                unsigned char outputMsg[DEFAULT_BUFLEN - 1] = "";
+
+                
+                unsigned char res[30] = "";
+                sprintf_s(res, 30, "%f", resval);
+
+                unsigned short usernlen = strlen(c.username);
+
+
+                strncat_s(outputMsg, DEFAULT_BUFLEN-1, c.username, DEFAULT_BUFLEN-1);
+                strncat_s(outputMsg, DEFAULT_BUFLEN - 1, ", result of", DEFAULT_BUFLEN - 1);
+                strncat_s(outputMsg, DEFAULT_BUFLEN - 1, msg, DEFAULT_BUFLEN - 1);
+                strncat_s(outputMsg, DEFAULT_BUFLEN - 1, ": ", DEFAULT_BUFLEN - 1);
+                strncat_s(outputMsg, DEFAULT_BUFLEN - 1, res, DEFAULT_BUFLEN - 1);
+
+
+                Lobby_sendMsg(l, BROAD_MSG, outputMsg, NULL);
+
+            }break;
+
+            default: {
+
+            }
             }
 
         } else if (iRecv <= 0) {
 
             printf("recv failed with error: %d on client %d,%s\n",WSAGetLastError(),(int)c.socket,c.username);
 
-            Lobby_sendMsg(l, CLIEND_DISCONNECTED_MSG, c.username, &l->clients[clientID]);
+            Lobby_sendMsg(l, CLIENT_DISCONNECTED_MSG, c.username, &l->clients[clientID]);
 
             closesocket(c.socket);
             lobbies->numClients--;
