@@ -105,7 +105,7 @@ void Client_sendMsg(struct Client* c,enum CommType code, unsigned char* msg) {
 
     if (msg != NULL) {
 
-        len = strnlen(msg, DEFAULT_BUFLEN - 1);
+        len = strnlen(msg, DEFAULT_BUFLEN - 2);
         strcpy_s(sendBuf + 1, DEFAULT_BUFLEN - 1, msg);
         
     }
@@ -179,7 +179,6 @@ void Lobby_join(unsigned char* code,struct Client* c) {
         return;
     }
 
-    printf("%s joined lobby %s\n", c->username, l->code);
 
     if (l->numClients >= l->maxClients) {
 
@@ -188,42 +187,38 @@ void Lobby_join(unsigned char* code,struct Client* c) {
 
     }
 
-    long len;
-    ioctlsocket(c->socket, FIONREAD, &len);
     l->clients[l->numClients++] = *c; //todo implement adding clients properly ffs
 
     Client_sendMsg(c, OK, NULL);
+
+    printf("%s joined lobby %s\n", c->username, l->code);
+
     Lobby_sendMsg(l, CLIENT_CONNECTED_MSG, c->username, &l->clients[l->numClients-1]);
 
+    char inputBuf[DEFAULT_BUFLEN];
 
+    while (1) {
 
-}
-void Lobby_run(struct Lobby* l) {
-    
-    printf("lobby %s is now running\n", l->code);
+        int iRecv = recv(c->socket, inputBuf, DEFAULT_BUFLEN, NULL);
+        if (iRecv > 0) {
+            unsigned char* msg = inputBuf + 1;
 
-    unsigned char inputBuf[DEFAULT_BUFLEN];
-    while (true) {
-
-        for (int i = 0; i < l->maxClients; i++) {
-            
-            struct Client* c = &l->clients[i];
-            if (!isClient(c))
-                continue;
-
-            int iRecv = recv(c->socket, inputBuf, DEFAULT_BUFLEN, NULL);
-            if (iRecv > 0) {
-                unsigned char* msg = inputBuf+1;
-
-                if (inputBuf[0] == BROAD_MSG) {
-                    Lobby_sendMsg(l,BROAD_MSG,msg,c);
-                }
-
+            if (inputBuf[0] == BROAD_MSG) {
+                Lobby_sendMsg(l, BROAD_MSG, msg, c);
             }
+
+        } else if (iRecv <= 0) {
+
+            closesocket(c->socket);
+            return;
 
         }
 
     }
+}
+void Lobby_run(struct Lobby* l) {
+    
+    printf("lobby %s is now running\n", l->code);
 
 }
 
@@ -415,7 +410,6 @@ void* handleConn(void * datain) {
     }
 
     // cleanup
-    send(ClientSocket, "\0",1,NULL);
     closesocket(ClientSocket);
     pthread_exit(NULL);
 
